@@ -68,7 +68,6 @@
         .cell:hover:not(.taken):not(.disabled) { background: #002200; box-shadow: inset 0 0 10px #0f0; }
         .cell.taken { cursor: default; }
         
-        /* Message scrolling */
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
 
@@ -100,7 +99,8 @@
         <!-- View: Landing -->
         <div id="view-landing" class="flex-1 flex flex-col items-center justify-center gap-8 p-8">
             <div class="text-center max-w-md">
-                <p class="text-xl mb-2 typing-effect">SECURE GAMING PROTOCOL v1.0</p>
+                <p class="text-xl mb-2 typing-effect">SECURE GAMING PROTOCOL v2.0</p>
+                <p class="text-xs text-green-700 mt-2">(CONNECTED VIA SECURE MQTT)</p>
             </div>
 
             <div class="flex flex-col w-full max-w-xs gap-4">
@@ -162,57 +162,34 @@
     </div>
 
     <script type="module">
-        import { joinRoom as trysteroJoinRoom } from 'https://cdn.jsdelivr.net/npm/trystero@0.16.0/+esm';
+        // FIX: Using MQTT strategy which is much faster and works on Vercel
+        import { joinRoom as trysteroJoinRoom } from 'https://esm.sh/trystero@0.16.0/mqtt';
 
         // --- GAME LOGIC & STATE ---
         const state = {
             roomCode: null,
             room: null,
             peers: {},
-            
-            // Game State
             board: Array(9).fill(null),
-            turn: 'X', // X always goes first
-            mySymbol: null, // 'X' or 'O'
+            turn: 'X',
+            mySymbol: null,
             gameActive: false,
             winner: null,
-            
-            // Actions
-            sendMove: null,
-            sendRestart: null,
-            sendChat: null,
-            sendSync: null
+            actions: {} // sendMove, sendSync, etc
         };
 
         const winningCombos = [
-            [0,1,2], [3,4,5], [6,7,8], // Rows
-            [0,3,6], [1,4,7], [2,5,8], // Cols
-            [0,4,8], [2,4,6]           // Diagonals
+            [0,1,2], [3,4,5], [6,7,8], 
+            [0,3,6], [1,4,7], [2,5,8], 
+            [0,4,8], [2,4,6]
         ];
 
-        // --- DOM ELEMENTS ---
         const els = {
             landing: document.getElementById('view-landing'),
             game: document.getElementById('view-game'),
-            inputs: {
-                join: document.getElementById('input-join-code'),
-                msg: document.getElementById('message-input')
-            },
-            btns: {
-                host: document.getElementById('btn-create'),
-                join: document.getElementById('btn-join'),
-                leave: document.getElementById('btn-leave'),
-                restart: document.getElementById('btn-restart'),
-                sendChat: document.getElementById('btn-send-chat')
-            },
-            display: {
-                code: document.getElementById('display-room-code'),
-                status: document.getElementById('game-status-text'),
-                player: document.getElementById('player-indicator'),
-                chat: document.getElementById('chat-log'),
-                cells: document.querySelectorAll('.cell'),
-                restartModal: document.getElementById('restart-container')
-            }
+            inputs: { join: document.getElementById('input-join-code'), msg: document.getElementById('message-input') },
+            btns: { host: document.getElementById('btn-create'), join: document.getElementById('btn-join'), leave: document.getElementById('btn-leave'), restart: document.getElementById('btn-restart'), sendChat: document.getElementById('btn-send-chat') },
+            display: { code: document.getElementById('display-room-code'), status: document.getElementById('game-status-text'), player: document.getElementById('player-indicator'), chat: document.getElementById('chat-log'), cells: document.querySelectorAll('.cell'), restartModal: document.getElementById('restart-container') }
         };
 
         // --- INITIALIZATION ---
@@ -220,20 +197,22 @@
         const initGame = (code) => {
             state.roomCode = code;
             
-            // Trystero Init - DIFFERENT APP ID than chat to avoid conflicts
-            const room = trysteroJoinRoom({ appId: 'anom_tictactoe_v3' }, code);
+            // CONFIG: Use public secure MQTT broker for instant connection
+            const config = { 
+                appId: 'anom_tactical_v4',
+                relayUrls: ['wss://broker.emqx.io:8084/mqtt'] 
+            };
+            
+            const room = trysteroJoinRoom(config, code);
             state.room = room;
             
-            // Setup Actions (Data Channels)
+            // Actions
             const [sendMove, getMove] = room.makeAction('move');
             const [sendRestart, getRestart] = room.makeAction('restart');
             const [sendChat, getChat] = room.makeAction('chat');
-            const [sendSync, getSync] = room.makeAction('sync'); // Host syncs logic to joiner
+            const [sendSync, getSync] = room.makeAction('sync');
 
-            state.sendMove = sendMove;
-            state.sendRestart = sendRestart;
-            state.sendChat = sendChat;
-            state.sendSync = sendSync;
+            state.actions = { sendMove, sendRestart, sendChat, sendSync };
 
             // Events
             getMove(handleRemoteMove);
@@ -241,15 +220,14 @@
             getChat(handleRemoteChat);
             getSync(handleSync);
 
-            // Peer Join: The moment a peer joins, we try to sync state
             room.onPeerJoin(peerId => {
-                logSystem(`NODE CONNECTED: ${peerId.substr(0,4)}`);
+                logSystem(`NODE DETECTED: ${peerId.substr(0,4)}`);
                 state.peers[peerId] = true;
                 checkPlayerCount();
                 
-                // If I am X (Host), I am the authority. Sync the board to the new guy.
+                // HOST LOGIC: If I am X, I sync the new player
                 if (state.mySymbol === 'X') {
-                    console.log("I am Host, syncing state to peer...");
+                    console.log("Syncing state to peer...");
                     sendSync({ board: state.board, turn: state.turn, gameActive: state.gameActive });
                 }
             });
@@ -258,26 +236,27 @@
                 logSystem(`NODE LOST: ${peerId.substr(0,4)}`);
                 delete state.peers[peerId];
                 state.gameActive = false;
-                updateStatus("OPPONENT DISCONNECTED");
+                updateStatus("TARGET LOST (OPPONENT LEFT)");
                 els.display.restartModal.classList.add('hidden');
             });
 
-            // View Switch
+            // Switch View
             els.landing.classList.add('hidden');
             els.game.classList.remove('hidden');
             els.display.code.innerText = code;
             
-            // Determine Role (Optimistic: If no peers yet, I am X)
+            // Initial Role Assignment (Optimistic)
             setTimeout(() => {
                 const peers = Object.keys(room.getPeers());
                 if (peers.length === 0) {
                     setRole('X');
                     updateStatus("WAITING FOR OPPONENT...");
+                    logSystem("ESTABLISHED AS HOST");
                 } else {
                     setRole('O');
-                    updateStatus("CONNECTED. WAITING FOR SYNC...");
-                    // As 'O', we disable board until 'X' sends the sync
-                    state.gameActive = false;
+                    updateStatus("CONNECTED. SYNCING...");
+                    logSystem("CONNECTED TO HOST");
+                    state.gameActive = false; // Wait for sync
                 }
             }, 500);
         };
@@ -294,7 +273,6 @@
         const checkPlayerCount = () => {
             const count = Object.keys(state.room.getPeers()).length + 1;
             document.getElementById('connection-status').innerText = `STATUS: CONNECTED [${count} NODES]`;
-            
             if (count > 1 && !state.winner) {
                 state.gameActive = true;
                 updateTurnIndicator();
@@ -302,38 +280,26 @@
         };
 
         const handleCellClick = (index) => {
-            // Validation
-            if (!state.gameActive) return;
-            if (state.winner) return;
-            if (state.board[index] !== null) return;
+            if (!state.gameActive || state.winner || state.board[index] !== null) return;
             
-            // Turn Check
             if (state.turn !== state.mySymbol) {
                 logSystem("ERROR: NOT YOUR TURN");
                 return;
             }
             
-            // Connection Check
             if (Object.keys(state.room.getPeers()).length === 0) {
                 logSystem("WAITING FOR TARGET...");
                 return;
             }
 
-            // Execute Move
             makeMove(index, state.mySymbol);
-            
-            // Broadcast
-            state.sendMove({ index: index, symbol: state.mySymbol });
+            state.actions.sendMove({ index: index, symbol: state.mySymbol });
         };
 
-        const handleRemoteMove = (data) => {
-            makeMove(data.index, data.symbol);
-        };
+        const handleRemoteMove = (data) => makeMove(data.index, data.symbol);
 
         const makeMove = (index, symbol) => {
             state.board[index] = symbol;
-            
-            // UI Update
             const cell = els.display.cells[index];
             cell.innerText = symbol;
             cell.classList.add(symbol === 'X' ? 'text-green-400' : 'text-red-500', 'taken');
@@ -351,11 +317,9 @@
             if (state.turn === state.mySymbol) {
                 updateStatus(">> YOUR TURN <<");
                 els.display.status.className = "font-bold text-green-500 animate-pulse text-xl";
-                document.body.style.cursor = 'default';
             } else {
                 updateStatus("OPPONENT CALCULATING...");
                 els.display.status.className = "font-bold text-gray-500 text-sm";
-                document.body.style.cursor = 'wait';
             }
         };
 
@@ -366,17 +330,14 @@
             for (let i = 0; i < winningCombos.length; i++) {
                 const [a, b, c] = winningCombos[i];
                 if (state.board[a] && state.board[a] === state.board[b] && state.board[a] === state.board[c]) {
-                    roundWon = true;
-                    winningLine = [a, b, c];
-                    break;
+                    roundWon = true; winningLine = [a, b, c]; break;
                 }
             }
 
             if (roundWon) {
-                state.winner = state.turn; // The person who just moved won
+                state.winner = state.turn;
                 state.gameActive = false;
                 highlightWin(winningLine);
-                
                 if (state.winner === state.mySymbol) {
                     updateStatus("VICTORY ACHIEVED");
                     els.display.status.className = "font-bold text-green-400 glow text-2xl";
@@ -405,21 +366,16 @@
         };
 
         // --- SYNC & UTILS ---
-
-        // This ensures the joiner gets the board state immediately
         const handleSync = (data) => {
             state.board = data.board;
             state.turn = data.turn;
             state.gameActive = data.gameActive;
             
-            // Re-render board
             state.board.forEach((sym, idx) => {
                 const cell = els.display.cells[idx];
                 cell.innerText = sym || '';
-                cell.className = "cell w-20 h-20 md:w-24 md:h-24"; // reset classes
-                if(sym) {
-                    cell.classList.add(sym === 'X' ? 'text-green-400' : 'text-red-500', 'taken');
-                }
+                cell.className = "cell w-20 h-20 md:w-24 md:h-24";
+                if(sym) cell.classList.add(sym === 'X' ? 'text-green-400' : 'text-red-500', 'taken');
             });
             updateTurnIndicator();
         };
@@ -436,16 +392,12 @@
                 cell.style.background = '';
                 cell.style.color = '';
             });
-            
             els.display.restartModal.classList.add('hidden');
             updateTurnIndicator();
             logSystem("SYSTEM REBOOTED");
         };
 
-        const updateStatus = (msg) => {
-            els.display.status.innerText = msg;
-        };
-
+        const updateStatus = (msg) => els.display.status.innerText = msg;
         const logSystem = (msg) => {
             const div = document.createElement('div');
             div.className = "text-center text-xs opacity-50";
@@ -453,8 +405,7 @@
             els.display.chat.appendChild(div);
             els.display.chat.scrollTop = els.display.chat.scrollHeight;
         };
-
-        const handleRemoteChat = (data, id) => {
+        const handleRemoteChat = (data) => {
             const div = document.createElement('div');
             div.innerHTML = `<span class="text-red-500 font-bold">OPP:</span> ${escapeHtml(data)}`;
             els.display.chat.appendChild(div);
@@ -464,8 +415,7 @@
         const sendChatMessage = () => {
             const txt = els.inputs.msg.value.trim();
             if (!txt) return;
-            if (state.sendChat) state.sendChat(txt);
-            
+            if (state.actions.sendChat) state.actions.sendChat(txt);
             const div = document.createElement('div');
             div.innerHTML = `<span class="text-green-500 font-bold">YOU:</span> ${escapeHtml(txt)}`;
             els.display.chat.appendChild(div);
@@ -473,19 +423,16 @@
             els.inputs.msg.value = '';
         };
 
-        // --- HELPERS ---
         const generateCode = () => {
-            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No O, 0, I, 1
+            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
             let result = '';
             for (let i = 0; i < 5; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
             return result;
         };
         const escapeHtml = (str) => str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-        // --- EVENT LISTENERS ---
-        
+        // --- EVENTS ---
         els.btns.host.addEventListener('click', () => initGame(generateCode()));
-        
         els.btns.join.addEventListener('click', () => {
             const code = els.inputs.join.value.toUpperCase();
             if (code.length >= 4) initGame(code);
@@ -494,23 +441,11 @@
                 document.getElementById('landing-error').classList.remove('hidden');
             }
         });
-
-        els.display.cells.forEach(cell => {
-            cell.addEventListener('click', (e) => handleCellClick(parseInt(e.target.dataset.index)));
-        });
-
-        els.btns.restart.addEventListener('click', () => {
-            resetBoard();
-            state.sendRestart('true');
-        });
-
+        els.display.cells.forEach(cell => cell.addEventListener('click', (e) => handleCellClick(parseInt(e.target.dataset.index))));
+        els.btns.restart.addEventListener('click', () => { resetBoard(); state.actions.sendRestart('true'); });
         els.btns.leave.addEventListener('click', () => location.reload());
-
         els.btns.sendChat.addEventListener('click', sendChatMessage);
-        els.inputs.msg.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') sendChatMessage();
-        });
-
+        els.inputs.msg.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChatMessage(); });
         els.display.code.addEventListener('click', () => {
             navigator.clipboard.writeText(state.roomCode);
             const prev = els.display.code.innerText;
