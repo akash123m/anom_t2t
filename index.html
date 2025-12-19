@@ -57,7 +57,6 @@
             box-shadow: 0 0 15px var(--neon-green);
         }
 
-        /* Grid specific styles */
         .cell {
             border: 1px solid #004400;
             display: flex; align-items: center; justify-content: center;
@@ -84,6 +83,11 @@
     <div class="scanlines"></div>
     <div class="vignette"></div>
 
+    <!-- Error Fallback -->
+    <div id="critical-error" class="hidden absolute top-0 left-0 w-full h-full bg-black z-[100] flex items-center justify-center text-red-500 font-mono p-10 text-center">
+        SYSTEM FAILURE: SCRIPT BLOCKED OR NETWORK ERROR. CHECK CONSOLE.
+    </div>
+
     <!-- Main Container -->
     <div id="app" class="w-full max-w-2xl h-[95vh] border border-green-800 bg-black bg-opacity-90 relative z-10 flex flex-col shadow-[0_0_20px_rgba(0,255,0,0.2)]">
         
@@ -93,14 +97,14 @@
                 <span class="animate-pulse text-red-500">●</span>
                 <h1 class="text-2xl tracking-widest glow font-bold">ANOM_TACTICAL</h1>
             </div>
-            <div id="connection-status" class="text-xs opacity-70">STATUS: IDLE</div>
+            <div id="connection-status" class="text-xs opacity-70">STATUS: READY</div>
         </header>
 
         <!-- View: Landing -->
         <div id="view-landing" class="flex-1 flex flex-col items-center justify-center gap-8 p-8">
             <div class="text-center max-w-md">
-                <p class="text-xl mb-2 typing-effect">SECURE GAMING PROTOCOL v2.0</p>
-                <p class="text-xs text-green-700 mt-2">(CONNECTED VIA SECURE MQTT)</p>
+                <p class="text-xl mb-2 typing-effect">SECURE GAMING PROTOCOL v3.0</p>
+                <p class="text-xs text-green-700 mt-2">ENCRYPTION: STUN/WEBRTC</p>
             </div>
 
             <div class="flex flex-col w-full max-w-xs gap-4">
@@ -162,8 +166,8 @@
     </div>
 
     <script type="module">
-        // FIX: Using MQTT strategy which is much faster and works on Vercel
-        import { joinRoom as trysteroJoinRoom } from 'https://esm.sh/trystero@0.16.0/mqtt';
+        // Standard, Reliable Import
+        import { joinRoom as trysteroJoinRoom } from 'https://cdn.jsdelivr.net/npm/trystero@0.16.0/+esm';
 
         // --- GAME LOGIC & STATE ---
         const state = {
@@ -175,7 +179,7 @@
             mySymbol: null,
             gameActive: false,
             winner: null,
-            actions: {} // sendMove, sendSync, etc
+            actions: {} 
         };
 
         const winningCombos = [
@@ -197,68 +201,80 @@
         const initGame = (code) => {
             state.roomCode = code;
             
-            // CONFIG: Use public secure MQTT broker for instant connection
+            // CONFIG: STUN Servers to fix Vercel/Network issues
             const config = { 
-                appId: 'anom_tactical_v4',
-                relayUrls: ['wss://broker.emqx.io:8084/mqtt'] 
+                appId: 'anom_tac_v5_final',
+                rtcConfig: {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:stun2.l.google.com:19302' }
+                    ]
+                }
             };
             
-            const room = trysteroJoinRoom(config, code);
-            state.room = room;
-            
-            // Actions
-            const [sendMove, getMove] = room.makeAction('move');
-            const [sendRestart, getRestart] = room.makeAction('restart');
-            const [sendChat, getChat] = room.makeAction('chat');
-            const [sendSync, getSync] = room.makeAction('sync');
+            try {
+                const room = trysteroJoinRoom(config, code);
+                state.room = room;
 
-            state.actions = { sendMove, sendRestart, sendChat, sendSync };
+                // Actions
+                const [sendMove, getMove] = room.makeAction('move');
+                const [sendRestart, getRestart] = room.makeAction('restart');
+                const [sendChat, getChat] = room.makeAction('chat');
+                const [sendSync, getSync] = room.makeAction('sync');
 
-            // Events
-            getMove(handleRemoteMove);
-            getRestart(resetBoard);
-            getChat(handleRemoteChat);
-            getSync(handleSync);
+                state.actions = { sendMove, sendRestart, sendChat, sendSync };
 
-            room.onPeerJoin(peerId => {
-                logSystem(`NODE DETECTED: ${peerId.substr(0,4)}`);
-                state.peers[peerId] = true;
-                checkPlayerCount();
+                // Events
+                getMove(handleRemoteMove);
+                getRestart(resetBoard);
+                getChat(handleRemoteChat);
+                getSync(handleSync);
+
+                room.onPeerJoin(peerId => {
+                    logSystem(`NODE DETECTED: ${peerId.substr(0,4)}`);
+                    state.peers[peerId] = true;
+                    checkPlayerCount();
+                    
+                    if (state.mySymbol === 'X') {
+                        // Host syncs the board to the new joiner
+                        sendSync({ board: state.board, turn: state.turn, gameActive: state.gameActive });
+                    }
+                });
+
+                room.onPeerLeave(peerId => {
+                    logSystem(`NODE LOST: ${peerId.substr(0,4)}`);
+                    delete state.peers[peerId];
+                    state.gameActive = false;
+                    updateStatus("TARGET LOST (OPPONENT LEFT)");
+                    els.display.restartModal.classList.add('hidden');
+                });
                 
-                // HOST LOGIC: If I am X, I sync the new player
-                if (state.mySymbol === 'X') {
-                    console.log("Syncing state to peer...");
-                    sendSync({ board: state.board, turn: state.turn, gameActive: state.gameActive });
-                }
-            });
+                // Success: Switch View
+                els.landing.classList.add('hidden');
+                els.game.classList.remove('hidden');
+                els.display.code.innerText = code;
+                
+                // Initial Role Assignment
+                setTimeout(() => {
+                    const peers = Object.keys(room.getPeers());
+                    if (peers.length === 0) {
+                        setRole('X');
+                        updateStatus("WAITING FOR OPPONENT...");
+                        logSystem("ESTABLISHED AS HOST");
+                    } else {
+                        setRole('O');
+                        updateStatus("CONNECTED. SYNCING...");
+                        logSystem("CONNECTED TO HOST");
+                        state.gameActive = false; 
+                    }
+                }, 500);
 
-            room.onPeerLeave(peerId => {
-                logSystem(`NODE LOST: ${peerId.substr(0,4)}`);
-                delete state.peers[peerId];
-                state.gameActive = false;
-                updateStatus("TARGET LOST (OPPONENT LEFT)");
-                els.display.restartModal.classList.add('hidden');
-            });
-
-            // Switch View
-            els.landing.classList.add('hidden');
-            els.game.classList.remove('hidden');
-            els.display.code.innerText = code;
-            
-            // Initial Role Assignment (Optimistic)
-            setTimeout(() => {
-                const peers = Object.keys(room.getPeers());
-                if (peers.length === 0) {
-                    setRole('X');
-                    updateStatus("WAITING FOR OPPONENT...");
-                    logSystem("ESTABLISHED AS HOST");
-                } else {
-                    setRole('O');
-                    updateStatus("CONNECTED. SYNCING...");
-                    logSystem("CONNECTED TO HOST");
-                    state.gameActive = false; // Wait for sync
-                }
-            }, 500);
+            } catch (err) {
+                console.error(err);
+                document.getElementById('landing-error').innerText = "INIT FAILED: " + err.message;
+                document.getElementById('landing-error').classList.remove('hidden');
+            }
         };
 
         // --- CORE LOGIC ---
@@ -432,15 +448,22 @@
         const escapeHtml = (str) => str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
         // --- EVENTS ---
-        els.btns.host.addEventListener('click', () => initGame(generateCode()));
+        els.btns.host.addEventListener('click', () => {
+            els.btns.host.innerText = "INITIALIZING...";
+            setTimeout(() => initGame(generateCode()), 100);
+        });
+        
         els.btns.join.addEventListener('click', () => {
             const code = els.inputs.join.value.toUpperCase();
-            if (code.length >= 4) initGame(code);
-            else {
+            if (code.length >= 4) {
+                els.btns.join.innerText = "...";
+                initGame(code);
+            } else {
                 document.getElementById('landing-error').innerText = "INVALID CODE LENGTH";
                 document.getElementById('landing-error').classList.remove('hidden');
             }
         });
+        
         els.display.cells.forEach(cell => cell.addEventListener('click', (e) => handleCellClick(parseInt(e.target.dataset.index))));
         els.btns.restart.addEventListener('click', () => { resetBoard(); state.actions.sendRestart('true'); });
         els.btns.leave.addEventListener('click', () => location.reload());
@@ -453,6 +476,10 @@
             setTimeout(() => els.display.code.innerText = prev, 1000);
         });
 
+        // Error Catcher
+        window.onerror = function() {
+            document.getElementById('critical-error').classList.remove('hidden');
+        };
     </script>
 </body>
 </html>
