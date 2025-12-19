@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ANOM | TICTACTOE</title>
+    <title>ANOM | TACTICAL GRID</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
     <style>
@@ -21,6 +21,7 @@
             overflow: hidden;
             height: 100vh;
             width: 100vw;
+            user-select: none;
         }
 
         /* CRT Effects */
@@ -62,11 +63,12 @@
             display: flex; align-items: center; justify-content: center;
             font-size: 3rem; cursor: pointer;
             transition: background 0.2s;
+            position: relative;
         }
-        .cell:hover:not(:disabled) { background: #002200; }
+        .cell:hover:not(.taken):not(.disabled) { background: #002200; box-shadow: inset 0 0 10px #0f0; }
         .cell.taken { cursor: default; }
-
-        /* Scrollbar */
+        
+        /* Message scrolling */
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
 
@@ -78,7 +80,7 @@
         @keyframes blink-caret { from, to { border-color: transparent } 50% { border-color: var(--neon-green); } }
     </style>
 </head>
-<body class="flex flex-col items-center justify-center relative selection:bg-green-900 selection:text-white">
+<body class="flex flex-col items-center justify-center relative">
 
     <div class="scanlines"></div>
     <div class="vignette"></div>
@@ -116,14 +118,14 @@
         <div id="view-game" class="hidden flex-1 flex flex-col h-full overflow-hidden">
             
             <!-- Game Info -->
-            <div class="bg-black p-2 text-center border-b border-green-900 flex justify-between px-4">
-                <div class="text-sm">CODE: <span id="display-room-code" class="font-bold glow cursor-copy select-all">---</span></div>
-                <div id="game-status-text" class="font-bold text-yellow-500 animate-pulse">WAITING FOR PLAYER...</div>
+            <div class="bg-black p-2 text-center border-b border-green-900 flex justify-between px-4 items-center">
+                <div class="text-sm">CODE: <span id="display-room-code" class="font-bold glow cursor-copy select-all underline decoration-dotted" title="Click to copy">---</span></div>
+                <div id="game-status-text" class="font-bold text-yellow-500 animate-pulse text-sm">WAITING FOR PLAYER...</div>
                 <button id="btn-leave" class="text-xs text-red-800 hover:text-red-500">[ABORT]</button>
             </div>
 
             <!-- The Board -->
-            <div class="flex-1 flex flex-col items-center justify-center p-4">
+            <div class="flex-1 flex flex-col items-center justify-center p-4 relative">
                 <div id="player-indicator" class="mb-4 text-xl">Initializing role...</div>
                 
                 <div class="grid grid-cols-3 gap-1 bg-green-900 border border-green-700 p-1 shadow-[0_0_15px_rgba(0,255,0,0.1)]">
@@ -139,15 +141,20 @@
                     <div class="cell w-20 h-20 md:w-24 md:h-24" data-index="8"></div>
                 </div>
 
-                <button id="btn-restart" class="hidden mt-6 btn-hacker px-6 py-2">RESTART SYSTEM</button>
+                <div id="restart-container" class="hidden absolute inset-0 bg-black/80 flex items-center justify-center z-20">
+                    <button id="btn-restart" class="btn-hacker px-6 py-4 text-2xl glow shadow-lg bg-black">RESTART SYSTEM</button>
+                </div>
             </div>
 
             <!-- Mini Chat -->
-            <div class="h-32 border-t border-green-800 flex flex-col bg-black">
-                <div id="chat-log" class="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-hide font-mono text-sm"></div>
+            <div class="h-40 border-t border-green-800 flex flex-col bg-black">
+                <div id="chat-log" class="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-hide font-mono text-sm">
+                    <div class="text-green-900 text-center italic text-xs">--- ENCRYPTED CHAT ---</div>
+                </div>
                 <div class="p-2 border-t border-green-900 flex gap-2">
-                    <span class="text-green-500">></span>
-                    <input type="text" id="message-input" class="terminal-input" placeholder="Say something..." autocomplete="off">
+                    <span class="text-green-500 animate-pulse">></span>
+                    <input type="text" id="message-input" class="terminal-input" placeholder="Transmit..." autocomplete="off">
+                    <button id="btn-send-chat" class="text-xs border border-green-800 px-2 hover:bg-green-900">SEND</button>
                 </div>
             </div>
         </div>
@@ -161,7 +168,6 @@
         const state = {
             roomCode: null,
             room: null,
-            myId: null,
             peers: {},
             
             // Game State
@@ -174,7 +180,8 @@
             // Actions
             sendMove: null,
             sendRestart: null,
-            sendChat: null
+            sendChat: null,
+            sendSync: null
         };
 
         const winningCombos = [
@@ -195,14 +202,16 @@
                 host: document.getElementById('btn-create'),
                 join: document.getElementById('btn-join'),
                 leave: document.getElementById('btn-leave'),
-                restart: document.getElementById('btn-restart')
+                restart: document.getElementById('btn-restart'),
+                sendChat: document.getElementById('btn-send-chat')
             },
             display: {
                 code: document.getElementById('display-room-code'),
                 status: document.getElementById('game-status-text'),
                 player: document.getElementById('player-indicator'),
                 chat: document.getElementById('chat-log'),
-                cells: document.querySelectorAll('.cell')
+                cells: document.querySelectorAll('.cell'),
+                restartModal: document.getElementById('restart-container')
             }
         };
 
@@ -211,11 +220,11 @@
         const initGame = (code) => {
             state.roomCode = code;
             
-            // Trystero Init
-            const room = trysteroJoinRoom({ appId: 'anom_tictactoe_v2' }, code);
+            // Trystero Init - DIFFERENT APP ID than chat to avoid conflicts
+            const room = trysteroJoinRoom({ appId: 'anom_tictactoe_v3' }, code);
             state.room = room;
             
-            // Actions
+            // Setup Actions (Data Channels)
             const [sendMove, getMove] = room.makeAction('move');
             const [sendRestart, getRestart] = room.makeAction('restart');
             const [sendChat, getChat] = room.makeAction('chat');
@@ -224,22 +233,24 @@
             state.sendMove = sendMove;
             state.sendRestart = sendRestart;
             state.sendChat = sendChat;
+            state.sendSync = sendSync;
 
             // Events
             getMove(handleRemoteMove);
             getRestart(resetBoard);
-            getChat(handleChat);
+            getChat(handleRemoteChat);
             getSync(handleSync);
 
+            // Peer Join: The moment a peer joins, we try to sync state
             room.onPeerJoin(peerId => {
                 logSystem(`NODE CONNECTED: ${peerId.substr(0,4)}`);
                 state.peers[peerId] = true;
                 checkPlayerCount();
                 
-                // If I am X (Host), I assign roles implicitly by being here first
+                // If I am X (Host), I am the authority. Sync the board to the new guy.
                 if (state.mySymbol === 'X') {
-                    // Send current state to new peer
-                    sendSync({ board: state.board, turn: state.turn });
+                    console.log("I am Host, syncing state to peer...");
+                    sendSync({ board: state.board, turn: state.turn, gameActive: state.gameActive });
                 }
             });
 
@@ -248,8 +259,7 @@
                 delete state.peers[peerId];
                 state.gameActive = false;
                 updateStatus("OPPONENT DISCONNECTED");
-                state.mySymbol = 'X'; // Fallback to host if alone
-                els.display.player.innerText = "YOU ARE HOST (X)";
+                els.display.restartModal.classList.add('hidden');
             });
 
             // View Switch
@@ -257,7 +267,7 @@
             els.game.classList.remove('hidden');
             els.display.code.innerText = code;
             
-            // Determine Role (Optimistic: If no peers, I am X)
+            // Determine Role (Optimistic: If no peers yet, I am X)
             setTimeout(() => {
                 const peers = Object.keys(room.getPeers());
                 if (peers.length === 0) {
@@ -266,8 +276,10 @@
                 } else {
                     setRole('O');
                     updateStatus("CONNECTED. WAITING FOR SYNC...");
+                    // As 'O', we disable board until 'X' sends the sync
+                    state.gameActive = false;
                 }
-            }, 500); // Slight delay for P2P discovery
+            }, 500);
         };
 
         // --- CORE LOGIC ---
@@ -275,8 +287,8 @@
         const setRole = (role) => {
             state.mySymbol = role;
             const color = role === 'X' ? 'text-green-400' : 'text-red-500';
-            els.display.player.innerHTML = `YOU ARE <span class="${color} font-bold text-2xl">${role}</span>`;
-            if (role === 'X') state.gameActive = true; // Host ready waiting
+            els.display.player.innerHTML = `IDENTITY: <span class="${color} font-bold text-3xl glow">${role}</span>`;
+            if (role === 'X') state.gameActive = true; 
         };
 
         const checkPlayerCount = () => {
@@ -294,12 +306,16 @@
             if (!state.gameActive) return;
             if (state.winner) return;
             if (state.board[index] !== null) return;
+            
+            // Turn Check
             if (state.turn !== state.mySymbol) {
-                logSystem("NOT YOUR TURN");
+                logSystem("ERROR: NOT YOUR TURN");
                 return;
             }
+            
+            // Connection Check
             if (Object.keys(state.room.getPeers()).length === 0) {
-                logSystem("WAITING FOR PLAYER...");
+                logSystem("WAITING FOR TARGET...");
                 return;
             }
 
@@ -333,11 +349,13 @@
         const updateTurnIndicator = () => {
             if (state.winner) return;
             if (state.turn === state.mySymbol) {
-                updateStatus("YOUR TURN >>");
-                els.display.status.className = "font-bold text-green-500 animate-pulse";
+                updateStatus(">> YOUR TURN <<");
+                els.display.status.className = "font-bold text-green-500 animate-pulse text-xl";
+                document.body.style.cursor = 'default';
             } else {
-                updateStatus("OPPONENT'S TURN...");
-                els.display.status.className = "font-bold text-gray-500";
+                updateStatus("OPPONENT CALCULATING...");
+                els.display.status.className = "font-bold text-gray-500 text-sm";
+                document.body.style.cursor = 'wait';
             }
         };
 
@@ -355,47 +373,52 @@
             }
 
             if (roundWon) {
-                state.winner = state.turn; // Current turn just moved and won
+                state.winner = state.turn; // The person who just moved won
                 state.gameActive = false;
                 highlightWin(winningLine);
                 
                 if (state.winner === state.mySymbol) {
                     updateStatus("VICTORY ACHIEVED");
-                    els.display.status.className = "font-bold text-green-400 glow text-xl";
+                    els.display.status.className = "font-bold text-green-400 glow text-2xl";
                 } else {
-                    updateStatus("DEFEAT RECORDED");
-                    els.display.status.className = "font-bold text-red-500 glow-red text-xl";
+                    updateStatus("SYSTEM COMPROMISED (LOSS)");
+                    els.display.status.className = "font-bold text-red-500 glow-red text-2xl";
                 }
-                els.btns.restart.classList.remove('hidden');
+                els.display.restartModal.classList.remove('hidden');
                 return;
             }
 
             if (!state.board.includes(null)) {
                 state.winner = 'draw';
                 state.gameActive = false;
-                updateStatus("SYSTEM DEADLOCK (DRAW)");
-                els.btns.restart.classList.remove('hidden');
+                updateStatus("DEADLOCK (DRAW)");
+                els.display.status.className = "font-bold text-yellow-500 text-xl";
+                els.display.restartModal.classList.remove('hidden');
             }
         };
 
         const highlightWin = (indices) => {
             indices.forEach(idx => {
-                els.display.cells[idx].style.background = state.winner === 'X' ? '#004400' : '#440000';
+                els.display.cells[idx].style.background = state.winner === 'X' ? '#003300' : '#330000';
+                els.display.cells[idx].style.color = '#fff';
             });
         };
 
         // --- SYNC & UTILS ---
 
+        // This ensures the joiner gets the board state immediately
         const handleSync = (data) => {
-            // Joiner receives board state from Host
             state.board = data.board;
             state.turn = data.turn;
+            state.gameActive = data.gameActive;
             
             // Re-render board
             state.board.forEach((sym, idx) => {
-                if (sym) {
-                    els.display.cells[idx].innerText = sym;
-                    els.display.cells[idx].classList.add(sym === 'X' ? 'text-green-400' : 'text-red-500', 'taken');
+                const cell = els.display.cells[idx];
+                cell.innerText = sym || '';
+                cell.className = "cell w-20 h-20 md:w-24 md:h-24"; // reset classes
+                if(sym) {
+                    cell.classList.add(sym === 'X' ? 'text-green-400' : 'text-red-500', 'taken');
                 }
             });
             updateTurnIndicator();
@@ -409,13 +432,14 @@
             
             els.display.cells.forEach(cell => {
                 cell.innerText = '';
-                cell.classList.remove('text-green-400', 'text-red-500', 'taken');
+                cell.className = "cell w-20 h-20 md:w-24 md:h-24";
                 cell.style.background = '';
+                cell.style.color = '';
             });
             
-            els.btns.restart.classList.add('hidden');
+            els.display.restartModal.classList.add('hidden');
             updateTurnIndicator();
-            logSystem("GAME RESET");
+            logSystem("SYSTEM REBOOTED");
         };
 
         const updateStatus = (msg) => {
@@ -430,9 +454,8 @@
             els.display.chat.scrollTop = els.display.chat.scrollHeight;
         };
 
-        const handleChat = (data, id) => {
+        const handleRemoteChat = (data, id) => {
             const div = document.createElement('div');
-            const isMe = false;
             div.innerHTML = `<span class="text-red-500 font-bold">OPP:</span> ${escapeHtml(data)}`;
             els.display.chat.appendChild(div);
             els.display.chat.scrollTop = els.display.chat.scrollHeight;
@@ -441,7 +464,7 @@
         const sendChatMessage = () => {
             const txt = els.inputs.msg.value.trim();
             if (!txt) return;
-            state.sendChat(txt);
+            if (state.sendChat) state.sendChat(txt);
             
             const div = document.createElement('div');
             div.innerHTML = `<span class="text-green-500 font-bold">YOU:</span> ${escapeHtml(txt)}`;
@@ -451,15 +474,25 @@
         };
 
         // --- HELPERS ---
-        const generateCode = () => Math.random().toString(36).substring(2, 8).toUpperCase();
+        const generateCode = () => {
+            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No O, 0, I, 1
+            let result = '';
+            for (let i = 0; i < 5; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
+            return result;
+        };
         const escapeHtml = (str) => str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
         // --- EVENT LISTENERS ---
         
         els.btns.host.addEventListener('click', () => initGame(generateCode()));
+        
         els.btns.join.addEventListener('click', () => {
             const code = els.inputs.join.value.toUpperCase();
-            if (code.length > 3) initGame(code);
+            if (code.length >= 4) initGame(code);
+            else {
+                document.getElementById('landing-error').innerText = "INVALID CODE LENGTH";
+                document.getElementById('landing-error').classList.remove('hidden');
+            }
         });
 
         els.display.cells.forEach(cell => {
@@ -473,16 +506,18 @@
 
         els.btns.leave.addEventListener('click', () => location.reload());
 
+        els.btns.sendChat.addEventListener('click', sendChatMessage);
         els.inputs.msg.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') sendChatMessage();
         });
 
         els.display.code.addEventListener('click', () => {
             navigator.clipboard.writeText(state.roomCode);
-            alert("CODE COPIED TO CLIPBOARD");
+            const prev = els.display.code.innerText;
+            els.display.code.innerText = "COPIED";
+            setTimeout(() => els.display.code.innerText = prev, 1000);
         });
 
     </script>
 </body>
-
 </html>
